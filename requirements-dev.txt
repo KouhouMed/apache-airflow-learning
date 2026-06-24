@@ -1,0 +1,20 @@
+# Local development only (Windows-safe) — IDE autocomplete, linting, tests
+# Run: pip install -r requirements-dev.txt
+#
+# Note: apache-airflow itself cannot be installed on Windows.
+# For full Airflow type hints in VS Code, point the Python interpreter
+# to the running container:
+#   Remote-Containers extension > Attach to Container > airflow-scheduler
+
+# Same runtime libs as Docker so imports resolve locally
+# (versions unpinned here so pip can pick a pre-built wheel on Windows)
+requests>=2.28.0
+pandas>=1.5.0,<3.0.0
+numpy>=1.24.0
+
+# Testing
+pytest==7.4.4
+pytest-mock==3.12.0
+
+# Linting / formatting
+ruff==0.3.4
