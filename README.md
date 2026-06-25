@@ -28,6 +28,7 @@ docker compose up -d             # start webserver + scheduler
 | Day | DAG / Feature | Concept covered |
 |-----|--------------|-----------------|
 | 1   | `hello_world` — project skeleton + first DAG | DAG structure, PythonOperator, BashOperator |
+| 2   | `weather_fetch` — live weather from Open-Meteo API | HTTP requests, XCom push/pull, WMO weather codes |
 
 ## Folder structure
 
