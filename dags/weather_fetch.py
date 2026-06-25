@@ -5,9 +5,9 @@ import requests
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 
-CITY = "Casablanca"
-LATITUDE = 33.5731
-LONGITUDE = -7.5898
+CITY = "Paris"
+LATITUDE = 48.8566
+LONGITUDE = 2.3522
 
 BASE_URL = "https://api.open-meteo.com/v1/forecast"
 
