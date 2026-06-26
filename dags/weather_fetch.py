@@ -1,3 +1,5 @@
+import os
+import sqlite3
 from datetime import datetime, timedelta
 
 import requests
@@ -10,6 +12,7 @@ LATITUDE = 48.8566
 LONGITUDE = 2.3522
 
 BASE_URL = "https://api.open-meteo.com/v1/forecast"
+DB_PATH = "/opt/airflow/data/weather.db"
 
 PARAMS = {
     "latitude": LATITUDE,
@@ -31,7 +34,6 @@ default_args = {
     "retry_delay": timedelta(minutes=3),
 }
 
-# WMO weather code descriptions (subset)
 WMO_CODES = {
     0: "Clear sky",
     1: "Mainly clear", 2: "Partly cloudy", 3: "Overcast",
@@ -44,20 +46,33 @@ WMO_CODES = {
 }
 
 
+def _ensure_table(conn):
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS weather (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            city         TEXT    NOT NULL,
+            recorded_at  TEXT    NOT NULL,
+            temperature_c  REAL,
+            feels_like_c   REAL,
+            humidity_pct   INTEGER,
+            wind_kph       REAL,
+            condition      TEXT,
+            dag_run_id     TEXT
+        )
+    """)
+    conn.commit()
+
+
 def fetch_weather(**context):
-    """Call Open-Meteo API and push raw response to XCom."""
     response = requests.get(BASE_URL, params=PARAMS, timeout=10)
     response.raise_for_status()
     data = response.json()
-    print(f"API response status : {response.status_code}")
-    print(f"Raw current weather : {data['current']}")
-    # Push to XCom so downstream tasks can read it
+    print(f"API status  : {response.status_code}")
+    print(f"Raw current : {data['current']}")
     context["ti"].xcom_push(key="raw_weather", value=data["current"])
-    return data["current"]
 
 
 def parse_weather(**context):
-    """Pull raw data from XCom and extract clean fields."""
     raw = context["ti"].xcom_pull(task_ids="fetch_weather", key="raw_weather")
     parsed = {
         "city": CITY,
@@ -68,35 +83,79 @@ def parse_weather(**context):
         "wind_kph": raw["wind_speed_10m"],
         "condition": WMO_CODES.get(raw["weather_code"], f"Code {raw['weather_code']}"),
     }
-    print(f"Parsed fields: {parsed}")
+    print(f"Parsed: {parsed}")
     context["ti"].xcom_push(key="parsed_weather", value=parsed)
-    return parsed
 
 
-def summarize_weather(**context):
-    """Print a human-readable weather summary."""
+def store_weather(**context):
+    """Insert today's reading into SQLite and print the running total."""
     w = context["ti"].xcom_pull(task_ids="parse_weather", key="parsed_weather")
-    summary = (
-        f"\n{'=' * 40}\n"
+    run_id = context["run_id"]
+
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    _ensure_table(conn)
+
+    conn.execute(
+        """
+        INSERT INTO weather
+            (city, recorded_at, temperature_c, feels_like_c,
+             humidity_pct, wind_kph, condition, dag_run_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            w["city"], w["time"], w["temperature_c"], w["feels_like_c"],
+            w["humidity_pct"], w["wind_kph"], w["condition"], run_id,
+        ),
+    )
+    conn.commit()
+
+    total = conn.execute("SELECT COUNT(*) FROM weather").fetchone()[0]
+    conn.close()
+    print(f"Saved row for {w['time']}. Total rows in DB: {total}")
+
+
+def report_weather(**context):
+    """Print the weather summary + last 5 stored readings from the DB."""
+    w = context["ti"].xcom_pull(task_ids="parse_weather", key="parsed_weather")
+
+    print(
+        f"\n{'=' * 42}\n"
         f"  Weather Report — {w['city']}\n"
-        f"  Date/time  : {w['time']}\n"
+        f"  Time       : {w['time']}\n"
         f"  Condition  : {w['condition']}\n"
-        f"  Temperature: {w['temperature_c']}°C (feels like {w['feels_like_c']}°C)\n"
+        f"  Temperature: {w['temperature_c']}°C  (feels like {w['feels_like_c']}°C)\n"
         f"  Humidity   : {w['humidity_pct']}%\n"
         f"  Wind speed : {w['wind_kph']} km/h\n"
-        f"{'=' * 40}"
+        f"{'=' * 42}"
     )
-    print(summary)
+
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        """
+        SELECT recorded_at, temperature_c, condition
+        FROM weather
+        ORDER BY id DESC
+        LIMIT 5
+        """
+    ).fetchall()
+    conn.close()
+
+    print("\n  Last 5 stored readings:")
+    print(f"  {'Time':<22} {'Temp':>6}  Condition")
+    print(f"  {'-'*22} {'-'*6}  {'-'*20}")
+    for recorded_at, temp, condition in rows:
+        print(f"  {recorded_at:<22} {temp:>5}°C  {condition}")
 
 
 with DAG(
     dag_id="weather_fetch",
     default_args=default_args,
-    description="Day 2 — fetch live weather from Open-Meteo and print a summary",
+    description="Day 3 — fetch, parse, store to SQLite, and report",
     schedule="@daily",
     start_date=datetime(2026, 6, 25),
     catchup=False,
-    tags=["learning", "day-2", "weather", "api"],
+    tags=["learning", "day-3", "weather", "sqlite"],
 ) as dag:
 
     fetch = PythonOperator(
@@ -109,9 +168,14 @@ with DAG(
         python_callable=parse_weather,
     )
 
-    summarize = PythonOperator(
-        task_id="summarize_weather",
-        python_callable=summarize_weather,
+    store = PythonOperator(
+        task_id="store_weather",
+        python_callable=store_weather,
     )
 
-    fetch >> parse >> summarize
+    report = PythonOperator(
+        task_id="report_weather",
+        python_callable=report_weather,
+    )
+
+    fetch >> parse >> store >> report
