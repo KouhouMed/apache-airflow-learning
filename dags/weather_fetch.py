@@ -88,7 +88,7 @@ def parse_weather(**context):
 
 
 def store_weather(**context):
-    """Insert today's reading into SQLite and print the running total."""
+    """Insert today's reading into SQLite — skips if timestamp already exists (idempotent)."""
     w = context["ti"].xcom_pull(task_ids="parse_weather", key="parsed_weather")
     run_id = context["run_id"]
 
@@ -96,23 +96,33 @@ def store_weather(**context):
     conn = sqlite3.connect(DB_PATH)
     _ensure_table(conn)
 
-    conn.execute(
-        """
-        INSERT INTO weather
-            (city, recorded_at, temperature_c, feels_like_c,
-             humidity_pct, wind_kph, condition, dag_run_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            w["city"], w["time"], w["temperature_c"], w["feels_like_c"],
-            w["humidity_pct"], w["wind_kph"], w["condition"], run_id,
-        ),
-    )
-    conn.commit()
+    # Idempotency check — re-running the DAG for the same interval is safe
+    already_exists = conn.execute(
+        "SELECT 1 FROM weather WHERE city = ? AND recorded_at = ?",
+        (w["city"], w["time"]),
+    ).fetchone()
+
+    if already_exists:
+        print(f"Record for {w['city']} at {w['time']} already exists — skipping insert.")
+    else:
+        conn.execute(
+            """
+            INSERT INTO weather
+                (city, recorded_at, temperature_c, feels_like_c,
+                 humidity_pct, wind_kph, condition, dag_run_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                w["city"], w["time"], w["temperature_c"], w["feels_like_c"],
+                w["humidity_pct"], w["wind_kph"], w["condition"], run_id,
+            ),
+        )
+        conn.commit()
+        print(f"Inserted record for {w['city']} at {w['time']}.")
 
     total = conn.execute("SELECT COUNT(*) FROM weather").fetchone()[0]
     conn.close()
-    print(f"Saved row for {w['time']}. Total rows in DB: {total}")
+    print(f"Total rows in DB: {total}")
 
 
 def report_weather(**context):
@@ -148,6 +158,36 @@ def report_weather(**context):
         print(f"  {recorded_at:<22} {temp:>5}°C  {condition}")
 
 
+def compute_stats():
+    """Query aggregate statistics across all stored readings."""
+    conn = sqlite3.connect(DB_PATH)
+    stats = conn.execute(
+        """
+        SELECT
+            COUNT(*)                        AS total_readings,
+            ROUND(MIN(temperature_c), 1)    AS min_temp,
+            ROUND(MAX(temperature_c), 1)    AS max_temp,
+            ROUND(AVG(temperature_c), 1)    AS avg_temp,
+            ROUND(AVG(humidity_pct), 1)     AS avg_humidity,
+            ROUND(AVG(wind_kph), 1)         AS avg_wind
+        FROM weather
+        WHERE city = ?
+        """,
+        (CITY,),
+    ).fetchone()
+    conn.close()
+
+    total, min_t, max_t, avg_t, avg_h, avg_w = stats
+    print(
+        f"\n{'=' * 42}\n"
+        f"  All-time stats — {CITY} ({total} readings)\n"
+        f"  Temperature : min {min_t}°C  /  max {max_t}°C  /  avg {avg_t}°C\n"
+        f"  Humidity    : avg {avg_h}%\n"
+        f"  Wind speed  : avg {avg_w} km/h\n"
+        f"{'=' * 42}"
+    )
+
+
 with DAG(
     dag_id="weather_fetch",
     default_args=default_args,
@@ -178,4 +218,9 @@ with DAG(
         python_callable=report_weather,
     )
 
-    fetch >> parse >> store >> report
+    stats = PythonOperator(
+        task_id="compute_stats",
+        python_callable=compute_stats,
+    )
+
+    fetch >> parse >> store >> report >> stats
