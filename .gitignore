@@ -1,3 +1,6 @@
+# Secrets / local config
+.env
+
 # Airflow runtime
 logs/
 data/*.db
