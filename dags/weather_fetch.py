@@ -2,6 +2,7 @@ import os
 import sqlite3
 from datetime import datetime, timedelta
 
+import pandas as pd
 import requests
 
 from airflow import DAG
@@ -49,18 +50,36 @@ WMO_CODES = {
 def _ensure_table(conn):
     conn.execute("""
         CREATE TABLE IF NOT EXISTS weather (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            city         TEXT    NOT NULL,
-            recorded_at  TEXT    NOT NULL,
-            temperature_c  REAL,
-            feels_like_c   REAL,
-            humidity_pct   INTEGER,
-            wind_kph       REAL,
-            condition      TEXT,
-            dag_run_id     TEXT
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            city            TEXT    NOT NULL,
+            recorded_at     TEXT    NOT NULL,
+            temperature_c   REAL,
+            feels_like_c    REAL,
+            humidity_pct    INTEGER,
+            wind_kph        REAL,
+            condition       TEXT,
+            dag_run_id      TEXT,
+            temp_category   TEXT,
+            wind_category   TEXT,
+            comfort_score   REAL
         )
     """)
     conn.commit()
+
+
+def _migrate_table(conn):
+    """Add Day 4 columns to existing DB without wiping data."""
+    new_columns = [
+        ("temp_category", "TEXT"),
+        ("wind_category", "TEXT"),
+        ("comfort_score", "REAL"),
+    ]
+    for col, col_type in new_columns:
+        try:
+            conn.execute(f"ALTER TABLE weather ADD COLUMN {col} {col_type}")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
 
 
 def fetch_weather(**context):
@@ -87,16 +106,53 @@ def parse_weather(**context):
     context["ti"].xcom_push(key="parsed_weather", value=parsed)
 
 
+def transform_weather(**context):
+    """Use pandas to derive temp_category, wind_category, and comfort_score."""
+    parsed = context["ti"].xcom_pull(task_ids="parse_weather", key="parsed_weather")
+
+    df = pd.DataFrame([parsed])
+
+    df["temp_category"] = pd.cut(
+        df["temperature_c"],
+        bins=[-float("inf"), 0, 10, 18, 25, float("inf")],
+        labels=["Freezing", "Cold", "Mild", "Warm", "Hot"],
+    ).astype(str)
+
+    df["wind_category"] = pd.cut(
+        df["wind_kph"],
+        bins=[-float("inf"), 5, 20, 40, float("inf")],
+        labels=["Calm", "Breeze", "Windy", "Strong"],
+    ).astype(str)
+
+    # Comfort score 0–100: penalises distance from ideal temp (21°C) and excess humidity
+    def _comfort(temp, humidity):
+        temp_penalty = abs(temp - 21) * 3
+        humidity_penalty = max(0, humidity - 60) * 0.4
+        return round(max(0.0, 100 - temp_penalty - humidity_penalty), 1)
+
+    df["comfort_score"] = df.apply(
+        lambda r: _comfort(r["temperature_c"], r["humidity_pct"]), axis=1
+    )
+
+    enriched = df.iloc[0].to_dict()
+    print(f"\n  Derived fields:")
+    print(f"    temp_category : {enriched['temp_category']}")
+    print(f"    wind_category : {enriched['wind_category']}")
+    print(f"    comfort_score : {enriched['comfort_score']} / 100")
+
+    context["ti"].xcom_push(key="enriched_weather", value=enriched)
+
+
 def store_weather(**context):
-    """Insert today's reading into SQLite — skips if timestamp already exists (idempotent)."""
-    w = context["ti"].xcom_pull(task_ids="parse_weather", key="parsed_weather")
+    """Insert enriched reading into SQLite — idempotent on (city, recorded_at)."""
+    w = context["ti"].xcom_pull(task_ids="transform_weather", key="enriched_weather")
     run_id = context["run_id"]
 
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     _ensure_table(conn)
+    _migrate_table(conn)
 
-    # Idempotency check — re-running the DAG for the same interval is safe
     already_exists = conn.execute(
         "SELECT 1 FROM weather WHERE city = ? AND recorded_at = ?",
         (w["city"], w["time"]),
@@ -109,12 +165,14 @@ def store_weather(**context):
             """
             INSERT INTO weather
                 (city, recorded_at, temperature_c, feels_like_c,
-                 humidity_pct, wind_kph, condition, dag_run_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 humidity_pct, wind_kph, condition, dag_run_id,
+                 temp_category, wind_category, comfort_score)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 w["city"], w["time"], w["temperature_c"], w["feels_like_c"],
                 w["humidity_pct"], w["wind_kph"], w["condition"], run_id,
+                w["temp_category"], w["wind_category"], w["comfort_score"],
             ),
         )
         conn.commit()
@@ -126,24 +184,26 @@ def store_weather(**context):
 
 
 def report_weather(**context):
-    """Print the weather summary + last 5 stored readings from the DB."""
-    w = context["ti"].xcom_pull(task_ids="parse_weather", key="parsed_weather")
+    """Print weather summary + last 5 readings including derived fields."""
+    w = context["ti"].xcom_pull(task_ids="transform_weather", key="enriched_weather")
 
     print(
-        f"\n{'=' * 42}\n"
+        f"\n{'=' * 46}\n"
         f"  Weather Report — {w['city']}\n"
-        f"  Time       : {w['time']}\n"
-        f"  Condition  : {w['condition']}\n"
-        f"  Temperature: {w['temperature_c']}°C  (feels like {w['feels_like_c']}°C)\n"
-        f"  Humidity   : {w['humidity_pct']}%\n"
-        f"  Wind speed : {w['wind_kph']} km/h\n"
-        f"{'=' * 42}"
+        f"  Time         : {w['time']}\n"
+        f"  Condition    : {w['condition']}\n"
+        f"  Temperature  : {w['temperature_c']}°C  →  {w['temp_category']}\n"
+        f"  Feels like   : {w['feels_like_c']}°C\n"
+        f"  Humidity     : {w['humidity_pct']}%\n"
+        f"  Wind speed   : {w['wind_kph']} km/h  →  {w['wind_category']}\n"
+        f"  Comfort score: {w['comfort_score']} / 100\n"
+        f"{'=' * 46}"
     )
 
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute(
         """
-        SELECT recorded_at, temperature_c, condition
+        SELECT recorded_at, temperature_c, temp_category, comfort_score
         FROM weather
         ORDER BY id DESC
         LIMIT 5
@@ -152,14 +212,14 @@ def report_weather(**context):
     conn.close()
 
     print("\n  Last 5 stored readings:")
-    print(f"  {'Time':<22} {'Temp':>6}  Condition")
-    print(f"  {'-'*22} {'-'*6}  {'-'*20}")
-    for recorded_at, temp, condition in rows:
-        print(f"  {recorded_at:<22} {temp:>5}°C  {condition}")
+    print(f"  {'Time':<22} {'Temp':>6}  {'Category':<10}  Comfort")
+    print(f"  {'-'*22} {'-'*6}  {'-'*10}  {'-'*7}")
+    for recorded_at, temp, category, comfort in rows:
+        print(f"  {recorded_at:<22} {temp:>5}°C  {str(category):<10}  {comfort}")
 
 
 def compute_stats():
-    """Query aggregate statistics across all stored readings."""
+    """Aggregate stats across all stored readings."""
     conn = sqlite3.connect(DB_PATH)
     stats = conn.execute(
         """
@@ -169,7 +229,8 @@ def compute_stats():
             ROUND(MAX(temperature_c), 1)    AS max_temp,
             ROUND(AVG(temperature_c), 1)    AS avg_temp,
             ROUND(AVG(humidity_pct), 1)     AS avg_humidity,
-            ROUND(AVG(wind_kph), 1)         AS avg_wind
+            ROUND(AVG(wind_kph), 1)         AS avg_wind,
+            ROUND(AVG(comfort_score), 1)    AS avg_comfort
         FROM weather
         WHERE city = ?
         """,
@@ -177,25 +238,26 @@ def compute_stats():
     ).fetchone()
     conn.close()
 
-    total, min_t, max_t, avg_t, avg_h, avg_w = stats
+    total, min_t, max_t, avg_t, avg_h, avg_w, avg_c = stats
     print(
-        f"\n{'=' * 42}\n"
+        f"\n{'=' * 46}\n"
         f"  All-time stats — {CITY} ({total} readings)\n"
-        f"  Temperature : min {min_t}°C  /  max {max_t}°C  /  avg {avg_t}°C\n"
-        f"  Humidity    : avg {avg_h}%\n"
-        f"  Wind speed  : avg {avg_w} km/h\n"
-        f"{'=' * 42}"
+        f"  Temperature  : min {min_t}°C  /  max {max_t}°C  /  avg {avg_t}°C\n"
+        f"  Humidity     : avg {avg_h}%\n"
+        f"  Wind speed   : avg {avg_w} km/h\n"
+        f"  Comfort score: avg {avg_c} / 100\n"
+        f"{'=' * 46}"
     )
 
 
 with DAG(
     dag_id="weather_fetch",
     default_args=default_args,
-    description="Day 3 — fetch, parse, store to SQLite, and report",
+    description="Day 4 — pandas transformation: temp/wind categories and comfort score",
     schedule="@daily",
     start_date=datetime(2026, 6, 25),
     catchup=False,
-    tags=["learning", "day-3", "weather", "sqlite"],
+    tags=["learning", "day-4", "weather", "pandas"],
 ) as dag:
 
     fetch = PythonOperator(
@@ -206,6 +268,11 @@ with DAG(
     parse = PythonOperator(
         task_id="parse_weather",
         python_callable=parse_weather,
+    )
+
+    transform = PythonOperator(
+        task_id="transform_weather",
+        python_callable=transform_weather,
     )
 
     store = PythonOperator(
@@ -223,4 +290,4 @@ with DAG(
         python_callable=compute_stats,
     )
 
-    fetch >> parse >> store >> report >> stats
+    fetch >> parse >> transform >> store >> report >> stats
