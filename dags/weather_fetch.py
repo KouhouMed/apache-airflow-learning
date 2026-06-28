@@ -6,7 +6,7 @@ import pandas as pd
 import requests
 
 from airflow import DAG
-from airflow.operators.python import PythonOperator
+from airflow.operators.python import BranchPythonOperator, PythonOperator
 
 CITY = "Paris"
 LATITUDE = 48.8566
@@ -80,6 +80,38 @@ def _migrate_table(conn):
             conn.commit()
         except sqlite3.OperationalError:
             pass  # column already exists
+
+
+def check_if_fetched(**context):
+    """Branch: skip the pipeline if today's data is already in the DB."""
+    today = context["ds"]  # YYYY-MM-DD, e.g. "2026-06-28"
+
+    if not os.path.exists(DB_PATH):
+        print(f"DB not found — first run, proceeding with fetch.")
+        return "fetch_weather"
+
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        exists = conn.execute(
+            "SELECT 1 FROM weather WHERE city = ? AND recorded_at LIKE ?",
+            (CITY, f"{today}%"),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        # Table doesn't exist yet
+        exists = None
+    finally:
+        conn.close()
+
+    if exists:
+        print(f"Data for {CITY} on {today} already in DB — skipping fetch.")
+        return "already_fetched"
+
+    print(f"No data for {CITY} on {today} — proceeding with fetch.")
+    return "fetch_weather"
+
+
+def already_fetched():
+    print("Pipeline skipped: today's weather data already stored.")
 
 
 def fetch_weather(**context):
