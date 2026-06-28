@@ -31,6 +31,7 @@ docker compose up -d             # start webserver + scheduler
 | 2   | `weather_fetch` — live weather from Open-Meteo API | HTTP requests, XCom push/pull, WMO weather codes |
 | 3   | `weather_fetch` + SQLite storage layer | `sqlite3`, `CREATE TABLE IF NOT EXISTS`, INSERT, SELECT |
 | 4   | `transform_weather` task — pandas enrichment | `pd.cut`, derived columns, DB migration, custom Dockerfile |
+| 5   | `BranchPythonOperator` — skip pipeline if today's data exists | branching, `context["ds"]`, task skipping |
 
 ## Folder structure
 
