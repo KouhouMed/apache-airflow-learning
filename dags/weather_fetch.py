@@ -285,12 +285,22 @@ def compute_stats():
 with DAG(
     dag_id="weather_fetch",
     default_args=default_args,
-    description="Day 4 — pandas transformation: temp/wind categories and comfort score",
+    description="Day 5 — BranchPythonOperator skips pipeline if today's data exists",
     schedule="@daily",
     start_date=datetime(2026, 6, 25),
     catchup=False,
-    tags=["learning", "day-4", "weather", "pandas"],
+    tags=["learning", "day-5", "weather", "branching"],
 ) as dag:
+
+    check = BranchPythonOperator(
+        task_id="check_if_fetched",
+        python_callable=check_if_fetched,
+    )
+
+    skip = PythonOperator(
+        task_id="already_fetched",
+        python_callable=already_fetched,
+    )
 
     fetch = PythonOperator(
         task_id="fetch_weather",
@@ -322,4 +332,5 @@ with DAG(
         python_callable=compute_stats,
     )
 
+    check >> [skip, fetch]
     fetch >> parse >> transform >> store >> report >> stats
