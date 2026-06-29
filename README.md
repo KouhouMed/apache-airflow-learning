@@ -1,10 +1,10 @@
 # WeatherFlow — Automated Weather Analytics Pipeline
 
-An Apache Airflow project built incrementally over 14 days as part of a structured learning plan. The pipeline fetches weather and air quality data from [Open-Meteo](https://open-meteo.com/) (free, no API key required), transforms it, validates it, and generates daily reports.
+An Apache Airflow project built incrementally over 14 days as part of a structured learning plan. The pipeline fetches weather data from [Open-Meteo](https://open-meteo.com/) (free, no API key required), transforms it, validates it, and generates daily reports.
 
 ## Project goals
 
-- Learn Apache Airflow 2.x from first principles
+- Learn Apache Airflow 3.x from first principles
 - Cover: DAGs, operators, sensors, XComs, hooks, custom operators, branching, task groups
 - Build a real, runnable data pipeline — not just toy examples
 
@@ -15,13 +15,31 @@ An Apache Airflow project built incrementally over 14 days as part of a structur
 git clone https://github.com/KouhouMed/apache-airflow-learning.git
 cd apache-airflow-learning
 
-# 2. Start Airflow
-docker compose up airflow-init   # run once to initialise the DB
-docker compose up -d             # start webserver + scheduler
+# 2. Copy env file
+cp .env.example .env
 
-# 3. Open the UI
+# 3. Build the custom image and initialise the DB (run once)
+docker compose build
+docker compose up airflow-init
+
+# 4. Start all services
+docker compose up -d
+
+# 5. Open the UI
 # http://localhost:8080  (admin / admin)
 ```
+
+## Services
+
+Airflow 3 splits the old single webserver into dedicated processes:
+
+| Container | Role |
+|-----------|------|
+| `airflow-api-server` | REST API + UI (replaces webserver) |
+| `airflow-scheduler` | Schedules and triggers DAG runs |
+| `airflow-dag-processor` | Parses DAG files (separated from scheduler in v3) |
+| `airflow-triggerer` | Handles deferrable operators |
+| `postgres` | Airflow metadata database |
 
 ## What's built so far
 
@@ -45,8 +63,8 @@ tests/         — unit tests
 
 ## Tech stack
 
-- Apache Airflow 2.9.1
-- Docker Compose (LocalExecutor + PostgreSQL)
-- Python 3.11
+- Apache Airflow 3.0.2
+- Docker Compose (LocalExecutor + PostgreSQL 15)
+- Python 3.12
 - Open-Meteo API (no API key needed)
 - SQLite / Pandas
