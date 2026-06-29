@@ -17,8 +17,10 @@ def print_hello():
 
 
 def print_context(**kwargs):
-    print(f"Logical date  : {kwargs['ds']}")
-    print(f"Next run date : {kwargs['next_ds']}")
+    logical = kwargs.get('logical_date')
+    end = kwargs.get('data_interval_end')
+    print(f"Logical date  : {logical.date() if logical else 'N/A (manual run)'}")
+    print(f"Next run date : {end.date() if end else 'N/A (manual run)'}")
     print(f"DAG run id    : {kwargs['run_id']}")
 
 

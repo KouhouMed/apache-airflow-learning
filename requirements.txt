@@ -1,4 +1,4 @@
 # Installed inside the Docker container — do NOT pip install this on Windows
-apache-airflow==2.9.1
+apache-airflow==3.0.2
 requests==2.31.0
 pandas==2.1.4
