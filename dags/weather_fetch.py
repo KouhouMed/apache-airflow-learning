@@ -160,6 +160,20 @@ def fetch_weather(**context):
     context["ti"].xcom_push(key="raw_weather", value=data["current"])
 
 
+def validate_response(**context):
+    """Raise ValueError if the API response is missing any required field."""
+    raw = context["ti"].xcom_pull(task_ids="fetch_weather", key="raw_weather")
+
+    if not raw:
+        raise ValueError("XCom payload from fetch_weather is empty.")
+
+    missing = [f for f in REQUIRED_FIELDS if f not in raw]
+    if missing:
+        raise ValueError(f"API response missing required fields: {missing}")
+
+    print(f"Validation passed — all {len(REQUIRED_FIELDS)} required fields present.")
+
+
 def parse_weather(**context):
     raw = context["ti"].xcom_pull(task_ids="fetch_weather", key="raw_weather")
     parsed = {
@@ -344,6 +358,11 @@ with DAG(
         python_callable=fetch_weather,
     )
 
+    validate = PythonOperator(
+        task_id="validate_response",
+        python_callable=validate_response,
+    )
+
     parse = PythonOperator(
         task_id="parse_weather",
         python_callable=parse_weather,
@@ -370,4 +389,4 @@ with DAG(
     )
 
     check >> [skip, fetch]
-    fetch >> parse >> transform >> store >> report >> stats
+    fetch >> validate >> parse >> transform >> store >> report >> stats
