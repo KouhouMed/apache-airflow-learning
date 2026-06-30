@@ -28,11 +28,48 @@ PARAMS = {
     "timezone": "auto",
 }
 
+REQUIRED_FIELDS = [
+    "temperature_2m", "apparent_temperature",
+    "relative_humidity_2m", "wind_speed_10m", "weather_code", "time",
+]
+
+
+# ---------------------------------------------------------------------------
+# Callbacks — applied to every task via default_args
+# ---------------------------------------------------------------------------
+
+def notify_on_failure(context):
+    ti = context["task_instance"]
+    print(
+        f"\n{'!' * 46}\n"
+        f"  TASK FAILED\n"
+        f"  DAG    : {ti.dag_id}\n"
+        f"  Task   : {ti.task_id}\n"
+        f"  Run ID : {context['run_id']}\n"
+        f"  Date   : {context.get('logical_date')}\n"
+        f"  Error  : {context.get('exception')}\n"
+        f"{'!' * 46}\n"
+        f"  → In production: trigger Slack / email / PagerDuty here."
+    )
+
+
+def notify_on_retry(context):
+    ti = context["task_instance"]
+    print(
+        f"  RETRY {ti.try_number}/{ti.max_tries + 1} — "
+        f"Task: {ti.task_id} — next attempt in {context['task'].retry_delay}"
+    )
+
+
 default_args = {
     "owner": "weatherflow",
     "depends_on_past": False,
-    "retries": 2,
-    "retry_delay": timedelta(minutes=3),
+    "retries": 3,
+    "retry_delay": timedelta(minutes=1),
+    "retry_exponential_backoff": True,   # delay doubles each retry: 1m, 2m, 4m
+    "max_retry_delay": timedelta(minutes=10),
+    "on_failure_callback": notify_on_failure,
+    "on_retry_callback": notify_on_retry,
 }
 
 WMO_CODES = {
