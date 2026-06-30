@@ -336,11 +336,11 @@ def compute_stats():
 with DAG(
     dag_id="weather_fetch",
     default_args=default_args,
-    description="Day 5 — BranchPythonOperator skips pipeline if today's data exists",
+    description="Day 6 — retries, exponential backoff, failure/retry callbacks, validation",
     schedule="@daily",
     start_date=datetime(2026, 6, 25),
     catchup=False,
-    tags=["learning", "day-5", "weather", "branching"],
+    tags=["learning", "day-6", "weather", "callbacks"],
 ) as dag:
 
     check = BranchPythonOperator(
