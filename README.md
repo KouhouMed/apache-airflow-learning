@@ -51,6 +51,7 @@ Airflow 3 splits the old single webserver into dedicated processes:
 | 4   | `transform_weather` task — pandas enrichment | `pd.cut`, derived columns, DB migration, custom Dockerfile |
 | 5   | `BranchPythonOperator` — skip pipeline if today's data exists | branching, `context["ds"]`, task skipping |
 | 6   | Retry logic, exponential backoff, failure/retry callbacks, response validation | `on_failure_callback`, `on_retry_callback`, `retry_exponential_backoff` |
+| 7   | `weekly_summary` DAG — weekly aggregation triggered by `weather_fetch` | `TriggerDagRunOperator`, cross-DAG data sharing, `@weekly` schedule |
 
 ## Folder structure
 
