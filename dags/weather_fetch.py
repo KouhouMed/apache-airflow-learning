@@ -7,6 +7,7 @@ import requests
 
 from airflow import DAG
 from airflow.operators.python import BranchPythonOperator, PythonOperator
+from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 
 CITY = "Paris"
 LATITUDE = 48.8566
@@ -336,11 +337,11 @@ def compute_stats():
 with DAG(
     dag_id="weather_fetch",
     default_args=default_args,
-    description="Day 6 — retries, exponential backoff, failure/retry callbacks, validation",
+    description="Day 7 — triggers weekly_summary DAG after each successful daily run",
     schedule="@daily",
     start_date=datetime(2026, 6, 25),
     catchup=False,
-    tags=["learning", "day-6", "weather", "callbacks"],
+    tags=["learning", "day-7", "weather", "trigger"],
 ) as dag:
 
     check = BranchPythonOperator(
@@ -388,5 +389,14 @@ with DAG(
         python_callable=compute_stats,
     )
 
+    trigger_weekly = TriggerDagRunOperator(
+        task_id="trigger_weekly_summary",
+        trigger_dag_id="weekly_summary",
+        # Use the ISO week as the run_id — same week re-triggers are idempotent
+        trigger_run_id="weekly_{{ dag_run.logical_date.strftime('%Y-W%W') }}",
+        reset_dag_run=True,       # re-use the run if it already exists
+        wait_for_completion=False, # don't block the daily DAG waiting for the weekly one
+    )
+
     check >> [skip, fetch]
-    fetch >> validate >> parse >> transform >> store >> report >> stats
+    fetch >> validate >> parse >> transform >> store >> report >> stats >> trigger_weekly
