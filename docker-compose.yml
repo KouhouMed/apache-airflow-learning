@@ -17,6 +17,8 @@ x-airflow-common:
     # Without a fixed secret each container generates its own key, breaking JWT verification across containers
     AIRFLOW__API_AUTH__JWT_SECRET: 'learning-project-jwt-secret-change-in-prod'
     _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-}
+    # Airflow connection — auto-created from env var, no UI setup needed
+    AIRFLOW_CONN_OPEN_METEO_API: '{"conn_type": "http", "host": "api.open-meteo.com", "schema": "https"}'
   volumes:
     - ./dags:/opt/airflow/dags
     - airflow-logs-volume:/opt/airflow/logs

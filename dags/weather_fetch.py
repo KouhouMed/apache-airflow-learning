@@ -7,6 +7,7 @@ import requests
 
 from airflow import DAG
 from airflow.operators.python import BranchPythonOperator, PythonOperator
+from airflow.providers.http.sensors.http import HttpSensor
 from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 
 CITY = "Paris"
@@ -126,7 +127,7 @@ def check_if_fetched(**context):
 
     if not os.path.exists(DB_PATH):
         print(f"DB not found — first run, proceeding with fetch.")
-        return "fetch_weather"
+        return "check_api_available"
 
     conn = sqlite3.connect(DB_PATH)
     try:
@@ -145,7 +146,7 @@ def check_if_fetched(**context):
         return "already_fetched"
 
     print(f"No data for {CITY} on {today} — proceeding with fetch.")
-    return "fetch_weather"
+    return "check_api_available"
 
 
 def already_fetched():
@@ -337,11 +338,11 @@ def compute_stats():
 with DAG(
     dag_id="weather_fetch",
     default_args=default_args,
-    description="Day 7 — triggers weekly_summary DAG after each successful daily run",
+    description="Day 8 — HttpSensor checks API availability before fetching",
     schedule="@daily",
     start_date=datetime(2026, 6, 25),
     catchup=False,
-    tags=["learning", "day-7", "weather", "trigger"],
+    tags=["learning", "day-8", "weather", "sensor"],
 ) as dag:
 
     check = BranchPythonOperator(
@@ -398,5 +399,20 @@ with DAG(
         wait_for_completion=False, # don't block the daily DAG waiting for the weekly one
     )
 
-    check >> [skip, fetch]
-    fetch >> validate >> parse >> transform >> store >> report >> stats >> trigger_weekly
+    sense = HttpSensor(
+        task_id="check_api_available",
+        http_conn_id="open_meteo_api",
+        endpoint="v1/forecast",
+        request_params={
+            "latitude": LATITUDE,
+            "longitude": LONGITUDE,
+            "current": "temperature_2m",
+        },
+        response_check=lambda response: response.status_code == 200,
+        poke_interval=30,    # poll every 30 seconds
+        timeout=300,         # give up after 5 minutes
+        mode="reschedule",   # release the worker slot between pokes (production-safe)
+    )
+
+    check >> [skip, sense]
+    sense >> fetch >> validate >> parse >> transform >> store >> report >> stats >> trigger_weekly

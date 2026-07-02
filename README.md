@@ -52,6 +52,7 @@ Airflow 3 splits the old single webserver into dedicated processes:
 | 5   | `BranchPythonOperator` — skip pipeline if today's data exists | branching, `context["ds"]`, task skipping |
 | 6   | Retry logic, exponential backoff, failure/retry callbacks, response validation | `on_failure_callback`, `on_retry_callback`, `retry_exponential_backoff` |
 | 7   | `weekly_summary` DAG — weekly aggregation triggered by `weather_fetch` | `TriggerDagRunOperator`, cross-DAG data sharing, `@weekly` schedule |
+| 8   | `HttpSensor` — poll API before fetching, connection via env var | `HttpSensor`, `mode="reschedule"`, `AIRFLOW_CONN_*` env var |
 
 ## Folder structure
 
