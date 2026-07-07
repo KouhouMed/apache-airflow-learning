@@ -54,6 +54,7 @@ Airflow 3 splits the old single webserver into dedicated processes:
 | 7   | `weekly_summary` DAG — weekly aggregation triggered by `weather_fetch` | `TriggerDagRunOperator`, cross-DAG data sharing, `@weekly` schedule |
 | 8   | `HttpSensor` — poll API before fetching, connection via env var | `HttpSensor`, `mode="reschedule"`, `AIRFLOW_CONN_*` env var |
 | 9   | `xcom_taskflow` — TaskFlow API vs classic XCom pattern | `@dag`, `@task`, implicit XCom, multi-upstream task arguments |
+| 10  | `air_quality_pipeline` — second data source (Open-Meteo AQ API) | EU/US AQI categories, second SQLite table, TaskFlow pattern |
 
 ## Folder structure
 
