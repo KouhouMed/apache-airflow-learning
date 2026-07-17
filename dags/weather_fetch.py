@@ -9,6 +9,7 @@ from airflow import DAG
 from airflow.operators.python import BranchPythonOperator, PythonOperator
 from airflow.providers.http.sensors.http import HttpSensor
 from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
+from airflow.utils.task_group import TaskGroup
 
 CITY = "Paris"
 LATITUDE = 48.8566
@@ -127,7 +128,7 @@ def check_if_fetched(**context):
 
     if not os.path.exists(DB_PATH):
         print(f"DB not found — first run, proceeding with fetch.")
-        return "check_api_available"
+        return "ingestion.check_api_available"
 
     conn = sqlite3.connect(DB_PATH)
     try:
@@ -146,7 +147,7 @@ def check_if_fetched(**context):
         return "already_fetched"
 
     print(f"No data for {CITY} on {today} — proceeding with fetch.")
-    return "check_api_available"
+    return "ingestion.check_api_available"
 
 
 def already_fetched():
@@ -164,10 +165,10 @@ def fetch_weather(**context):
 
 def validate_response(**context):
     """Raise ValueError if the API response is missing any required field."""
-    raw = context["ti"].xcom_pull(task_ids="fetch_weather", key="raw_weather")
+    raw = context["ti"].xcom_pull(task_ids="ingestion.fetch_weather", key="raw_weather")
 
     if not raw:
-        raise ValueError("XCom payload from fetch_weather is empty.")
+        raise ValueError("XCom payload from ingestion.fetch_weather is empty.")
 
     missing = [f for f in REQUIRED_FIELDS if f not in raw]
     if missing:
@@ -177,7 +178,7 @@ def validate_response(**context):
 
 
 def parse_weather(**context):
-    raw = context["ti"].xcom_pull(task_ids="fetch_weather", key="raw_weather")
+    raw = context["ti"].xcom_pull(task_ids="ingestion.fetch_weather", key="raw_weather")
     parsed = {
         "city": CITY,
         "time": raw["time"],
@@ -193,7 +194,7 @@ def parse_weather(**context):
 
 def transform_weather(**context):
     """Use pandas to derive temp_category, wind_category, and comfort_score."""
-    parsed = context["ti"].xcom_pull(task_ids="parse_weather", key="parsed_weather")
+    parsed = context["ti"].xcom_pull(task_ids="processing.parse_weather", key="parsed_weather")
 
     df = pd.DataFrame([parsed])
 
@@ -230,7 +231,7 @@ def transform_weather(**context):
 
 def store_weather(**context):
     """Insert enriched reading into SQLite — idempotent on (city, recorded_at)."""
-    w = context["ti"].xcom_pull(task_ids="transform_weather", key="enriched_weather")
+    w = context["ti"].xcom_pull(task_ids="processing.transform_weather", key="enriched_weather")
     run_id = context["run_id"]
 
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -270,7 +271,7 @@ def store_weather(**context):
 
 def report_weather(**context):
     """Print weather summary + last 5 readings including derived fields."""
-    w = context["ti"].xcom_pull(task_ids="transform_weather", key="enriched_weather")
+    w = context["ti"].xcom_pull(task_ids="processing.transform_weather", key="enriched_weather")
 
     print(
         f"\n{'=' * 46}\n"
@@ -338,11 +339,11 @@ def compute_stats():
 with DAG(
     dag_id="weather_fetch",
     default_args=default_args,
-    description="Day 8 — HttpSensor checks API availability before fetching",
+    description="Day 11 — TaskGroup: ingestion / processing / storage / reporting",
     schedule="@daily",
     start_date=datetime(2026, 6, 25),
     catchup=False,
-    tags=["learning", "day-8", "weather", "sensor"],
+    tags=["learning", "day-11", "weather", "task-group"],
 ) as dag:
 
     check = BranchPythonOperator(
@@ -355,64 +356,78 @@ with DAG(
         python_callable=already_fetched,
     )
 
-    fetch = PythonOperator(
-        task_id="fetch_weather",
-        python_callable=fetch_weather,
-    )
+    # ── Group 1: check API is up, fetch raw data, validate schema ────────────
+    with TaskGroup("ingestion", tooltip="Check API availability, fetch, validate") as ingestion:
+        sense = HttpSensor(
+            task_id="check_api_available",
+            http_conn_id="open_meteo_api",
+            endpoint="v1/forecast",
+            request_params={
+                "latitude": LATITUDE,
+                "longitude": LONGITUDE,
+                "current": "temperature_2m",
+            },
+            response_check=lambda response: response.status_code == 200,
+            poke_interval=30,
+            timeout=300,
+            mode="reschedule",
+        )
 
-    validate = PythonOperator(
-        task_id="validate_response",
-        python_callable=validate_response,
-    )
+        fetch = PythonOperator(
+            task_id="fetch_weather",
+            python_callable=fetch_weather,
+        )
 
-    parse = PythonOperator(
-        task_id="parse_weather",
-        python_callable=parse_weather,
-    )
+        validate = PythonOperator(
+            task_id="validate_response",
+            python_callable=validate_response,
+        )
 
-    transform = PythonOperator(
-        task_id="transform_weather",
-        python_callable=transform_weather,
-    )
+        sense >> fetch >> validate
 
-    store = PythonOperator(
-        task_id="store_weather",
-        python_callable=store_weather,
-    )
+    # ── Group 2: parse fields, enrich with pandas ─────────────────────────────
+    with TaskGroup("processing", tooltip="Parse fields and derive categories + comfort score") as processing:
+        parse = PythonOperator(
+            task_id="parse_weather",
+            python_callable=parse_weather,
+        )
 
-    report = PythonOperator(
-        task_id="report_weather",
-        python_callable=report_weather,
-    )
+        transform = PythonOperator(
+            task_id="transform_weather",
+            python_callable=transform_weather,
+        )
 
-    stats = PythonOperator(
-        task_id="compute_stats",
-        python_callable=compute_stats,
-    )
+        parse >> transform
 
-    trigger_weekly = TriggerDagRunOperator(
-        task_id="trigger_weekly_summary",
-        trigger_dag_id="weekly_summary",
-        # Use the ISO week as the run_id — same week re-triggers are idempotent
-        trigger_run_id="weekly_{{ dag_run.logical_date.strftime('%Y-W%W') }}",
-        reset_dag_run=True,       # re-use the run if it already exists
-        wait_for_completion=False, # don't block the daily DAG waiting for the weekly one
-    )
+    # ── Group 3: persist to SQLite ────────────────────────────────────────────
+    with TaskGroup("storage", tooltip="Idempotent insert into SQLite") as storage:
+        store = PythonOperator(
+            task_id="store_weather",
+            python_callable=store_weather,
+        )
 
-    sense = HttpSensor(
-        task_id="check_api_available",
-        http_conn_id="open_meteo_api",
-        endpoint="v1/forecast",
-        request_params={
-            "latitude": LATITUDE,
-            "longitude": LONGITUDE,
-            "current": "temperature_2m",
-        },
-        response_check=lambda response: response.status_code == 200,
-        poke_interval=30,    # poll every 30 seconds
-        timeout=300,         # give up after 5 minutes
-        mode="reschedule",   # release the worker slot between pokes (production-safe)
-    )
+    # ── Group 4: report, aggregate stats, trigger weekly DAG ─────────────────
+    with TaskGroup("reporting", tooltip="Daily report, all-time stats, weekly trigger") as reporting:
+        report = PythonOperator(
+            task_id="report_weather",
+            python_callable=report_weather,
+        )
 
-    check >> [skip, sense]
-    sense >> fetch >> validate >> parse >> transform >> store >> report >> stats >> trigger_weekly
+        stats = PythonOperator(
+            task_id="compute_stats",
+            python_callable=compute_stats,
+        )
+
+        trigger_weekly = TriggerDagRunOperator(
+            task_id="trigger_weekly_summary",
+            trigger_dag_id="weekly_summary",
+            trigger_run_id="weekly_{{ dag_run.logical_date.strftime('%Y-W%W') }}",
+            reset_dag_run=True,
+            wait_for_completion=False,
+        )
+
+        report >> stats >> trigger_weekly
+
+    # ── Top-level wiring ──────────────────────────────────────────────────────
+    check >> [skip, ingestion]
+    ingestion >> processing >> storage >> reporting
