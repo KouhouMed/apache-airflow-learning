@@ -36,6 +36,14 @@ REQUIRED_FIELDS = [
     "relative_humidity_2m", "wind_speed_10m", "weather_code", "time",
 ]
 
+# Physically plausible bounds for each numeric field (world-record extremes)
+FIELD_RANGES = {
+    "temperature_2m":       (-90.0, 60.0),
+    "apparent_temperature": (-90.0, 70.0),
+    "relative_humidity_2m": (0.0,  100.0),
+    "wind_speed_10m":       (0.0,  500.0),
+}
+
 
 # ---------------------------------------------------------------------------
 # Callbacks — applied to every task via default_args
@@ -152,6 +160,56 @@ def check_if_fetched(**context):
 
 def already_fetched():
     print("Pipeline skipped: today's weather data already stored.")
+
+
+# ---------------------------------------------------------------------------
+# Data quality checks (Day 12)
+# ---------------------------------------------------------------------------
+
+def check_nulls(**context):
+    """Fail if any required field in the raw API payload is None."""
+    raw = context["ti"].xcom_pull(task_ids="ingestion.fetch_weather", key="raw_weather")
+    if not raw:
+        raise ValueError("No raw payload in XCom — fetch_weather may have failed silently.")
+    nulls = [f for f in REQUIRED_FIELDS if raw.get(f) is None]
+    if nulls:
+        raise ValueError(f"Quality check FAILED — null values in required fields: {nulls}")
+    print(f"Null check passed — all {len(REQUIRED_FIELDS)} required fields are non-null.")
+
+
+def check_ranges(**context):
+    """Fail if any numeric field falls outside its physically plausible range."""
+    raw = context["ti"].xcom_pull(task_ids="ingestion.fetch_weather", key="raw_weather")
+    violations = []
+    for field, (lo, hi) in FIELD_RANGES.items():
+        value = raw.get(field)
+        if value is not None and not (lo <= value <= hi):
+            violations.append(f"{field}={value!r}  (expected {lo}–{hi})")
+    if violations:
+        raise ValueError(f"Quality check FAILED — out-of-range values:\n  " + "\n  ".join(violations))
+    print(f"Range check passed — all {len(FIELD_RANGES)} numeric fields within expected bounds.")
+
+
+def check_row_count(**context):
+    """Assert at least one row exists for today after the storage step."""
+    today = context["ds"]
+    if not os.path.exists(DB_PATH):
+        raise FileNotFoundError(f"DB not found at {DB_PATH} after store_weather ran.")
+    conn = sqlite3.connect(DB_PATH)
+    total = conn.execute(
+        "SELECT COUNT(*) FROM weather WHERE city = ?", (CITY,)
+    ).fetchone()[0]
+    today_count = conn.execute(
+        "SELECT COUNT(*) FROM weather WHERE city = ? AND recorded_at LIKE ?",
+        (CITY, f"{today}%"),
+    ).fetchone()[0]
+    conn.close()
+    print(f"Row count — total for {CITY}: {total}, today ({today}): {today_count}")
+    if today_count == 0:
+        raise AssertionError(
+            f"Quality check FAILED — 0 rows for {CITY} on {today} after storage."
+        )
+    print("Row count check passed.")
 
 
 def fetch_weather(**context):
@@ -339,11 +397,11 @@ def compute_stats():
 with DAG(
     dag_id="weather_fetch",
     default_args=default_args,
-    description="Day 11 — TaskGroup: ingestion / processing / storage / reporting",
+    description="Day 12 — data quality checks: nulls, range validation, row count assertion",
     schedule="@daily",
     start_date=datetime(2026, 6, 25),
     catchup=False,
-    tags=["learning", "day-11", "weather", "task-group"],
+    tags=["learning", "day-12", "weather", "data-quality"],
 ) as dag:
 
     check = BranchPythonOperator(
@@ -385,7 +443,21 @@ with DAG(
 
         sense >> fetch >> validate
 
-    # ── Group 2: parse fields, enrich with pandas ─────────────────────────────
+    # ── Group 2: data quality gate ────────────────────────────────────────────
+    with TaskGroup("quality", tooltip="Null checks, range validation, row count assertion") as quality:
+        null_check = PythonOperator(
+            task_id="check_nulls",
+            python_callable=check_nulls,
+        )
+
+        range_check = PythonOperator(
+            task_id="check_ranges",
+            python_callable=check_ranges,
+        )
+
+        null_check >> range_check
+
+    # ── Group 3: parse fields, enrich with pandas ─────────────────────────────
     with TaskGroup("processing", tooltip="Parse fields and derive categories + comfort score") as processing:
         parse = PythonOperator(
             task_id="parse_weather",
@@ -399,14 +471,21 @@ with DAG(
 
         parse >> transform
 
-    # ── Group 3: persist to SQLite ────────────────────────────────────────────
-    with TaskGroup("storage", tooltip="Idempotent insert into SQLite") as storage:
+    # ── Group 4: persist to SQLite, assert row count ──────────────────────────
+    with TaskGroup("storage", tooltip="Idempotent insert into SQLite + row count assertion") as storage:
         store = PythonOperator(
             task_id="store_weather",
             python_callable=store_weather,
         )
 
-    # ── Group 4: report, aggregate stats, trigger weekly DAG ─────────────────
+        row_count = PythonOperator(
+            task_id="check_row_count",
+            python_callable=check_row_count,
+        )
+
+        store >> row_count
+
+    # ── Group 5: report, aggregate stats, trigger weekly DAG ─────────────────
     with TaskGroup("reporting", tooltip="Daily report, all-time stats, weekly trigger") as reporting:
         report = PythonOperator(
             task_id="report_weather",
@@ -430,4 +509,4 @@ with DAG(
 
     # ── Top-level wiring ──────────────────────────────────────────────────────
     check >> [skip, ingestion]
-    ingestion >> processing >> storage >> reporting
+    ingestion >> quality >> processing >> storage >> reporting
