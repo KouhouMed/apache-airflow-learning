@@ -409,11 +409,43 @@ _CAT_COLOR = {
 
 
 def generate_html_report(**context):
-    """Write a self-contained HTML report to /opt/airflow/reports/weather_YYYY-MM-DD.html."""
+    """Write a self-contained HTML report to /opt/airflow/reports/weather_YYYY-MM-DD.html.
+
+    Reads today's current reading directly from SQLite so it runs on BOTH branches:
+    - normal run  → data was just fetched and stored this execution
+    - skip branch → data was already in the DB from an earlier run today
+    """
     today = context["ds"]
-    w = context["ti"].xcom_pull(task_ids="processing.transform_weather", key="enriched_weather")
 
     conn = sqlite3.connect(DB_PATH)
+    # Fetch today's most recent reading for the "current conditions" section
+    row = conn.execute(
+        """
+        SELECT temperature_c, feels_like_c, humidity_pct, wind_kph,
+               condition, temp_category, wind_category, comfort_score, recorded_at
+        FROM   weather
+        WHERE  city = ? AND recorded_at LIKE ?
+        ORDER  BY id DESC LIMIT 1
+        """,
+        (CITY, f"{today}%"),
+    ).fetchone()
+
+    if not row:
+        print(f"No data found for {CITY} on {today} — skipping HTML report generation.")
+        return
+
+    temp_c, feels_c, hum, wind, condition, temp_cat, wind_cat, comfort, _ = row
+    w = {
+        "temperature_c": temp_c,
+        "feels_like_c":  feels_c,
+        "humidity_pct":  hum,
+        "wind_kph":      wind,
+        "condition":     condition,
+        "temp_category": temp_cat,
+        "wind_category": wind_cat,
+        "comfort_score": comfort,
+    }
+
     history = conn.execute(
         """
         SELECT recorded_at, temperature_c, feels_like_c, humidity_pct,
@@ -670,8 +702,8 @@ with DAG(
 
         store >> row_count
 
-    # ── Group 5: report, generate HTML artifact, aggregate stats, trigger weekly ─
-    with TaskGroup("reporting", tooltip="Console report, HTML artifact, stats, weekly trigger") as reporting:
+    # ── Group 5: console report, stats, trigger weekly ───────────────────────
+    with TaskGroup("reporting", tooltip="Console report, all-time stats, weekly trigger") as reporting:
         report = PythonOperator(
             task_id="report_weather",
             python_callable=report_weather,
@@ -682,11 +714,6 @@ with DAG(
             python_callable=compute_stats,
         )
 
-        html_report = PythonOperator(
-            task_id="generate_html_report",
-            python_callable=generate_html_report,
-        )
-
         trigger_weekly = TriggerDagRunOperator(
             task_id="trigger_weekly_summary",
             trigger_dag_id="weekly_summary",
@@ -695,10 +722,20 @@ with DAG(
             wait_for_completion=False,
         )
 
-        # stats and html_report run in parallel after the console report;
-        # both must succeed before triggering the weekly summary
-        report >> [stats, html_report] >> trigger_weekly
+        report >> stats >> trigger_weekly
+
+    # ── HTML report — top-level, runs on BOTH branches ────────────────────────
+    # trigger_rule="none_failed_min_one_success":
+    #   • full pipeline path  → storage group succeeds  → html_report runs
+    #   • already-fetched path → already_fetched succeeds → html_report runs
+    #     (reads today's row from DB that was stored in a prior run)
+    html_report = PythonOperator(
+        task_id="generate_html_report",
+        python_callable=generate_html_report,
+        trigger_rule="none_failed_min_one_success",
+    )
 
     # ── Top-level wiring ──────────────────────────────────────────────────────
     check >> [skip, ingestion]
     ingestion >> quality >> processing >> storage >> reporting
+    [skip, storage] >> html_report
