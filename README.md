@@ -57,6 +57,7 @@ Airflow 3 splits the old single webserver into dedicated processes:
 | 10  | `air_quality_pipeline` — second data source (Open-Meteo AQ API) | EU/US AQI categories, second SQLite table, TaskFlow pattern |
 | 11  | `weather_fetch` — TaskGroup refactor: ingestion / processing / storage / reporting | `TaskGroup`, collapsible UI groups, task ID prefixing (`group.task`), XCom across groups |
 | 12  | `weather_fetch` — data quality gate: nulls, range validation, row count assertion | quality `TaskGroup`, `FIELD_RANGES`, `AssertionError` as pipeline circuit-breaker |
+| 13  | `weather_fetch` — HTML report generator: daily artifact saved to `reports/` | f-string HTML templating, parallel tasks, self-contained CSS, file output from Airflow |
 
 ## Folder structure
 
