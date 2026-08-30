@@ -1,3 +1,31 @@
+"""
+weather_fetch — WeatherFlow main pipeline
+==========================================
+Built incrementally over Days 2-14 of the 14-day Airflow learning project.
+
+Pipeline shape (5 TaskGroups + branch logic):
+
+    check_if_fetched ──► already_fetched ──────────────────────────────────┐
+                     └─► ingestion ──► quality ──► processing ──► storage ─┤
+                                                                  reporting  │
+                                                                             └─► generate_html_report
+
+Groups
+------
+ingestion   HttpSensor pings the API → fetch_weather → validate_response
+quality     check_nulls → check_ranges (circuit-breaker: fail fast on bad data)
+processing  parse_weather → transform_weather (pandas pd.cut, comfort score)
+storage     store_weather (idempotent INSERT) → check_row_count (assertion)
+reporting   report_weather → compute_stats → trigger_weekly_summary
+
+generate_html_report runs on BOTH branches (trigger_rule=none_failed_min_one_success)
+and reads today's row from SQLite, so it works whether data was fetched
+this run or was already present from an earlier execution.
+
+Concepts covered: BranchPythonOperator, HttpSensor, XCom push/pull,
+retry/backoff callbacks, TaskGroup, data quality gates, TriggerDagRunOperator,
+trigger_rule, self-contained HTML generation.
+"""
 import os
 import sqlite3
 from datetime import datetime, timedelta
